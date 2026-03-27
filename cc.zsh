@@ -10,6 +10,21 @@ _CC_WT_BASE="${CC_WT_BASE:-$HOME/worktrees}"
 _CC_PROJECT_BASE="${CC_PROJECT_BASE:-$HOME/projects}"
 
 # ──────────────────────────────────────────────────
+# _cc_expand_flags: cc 전용 플래그를 claude CLI 옵션으로 변환
+# 결과는 _cc_args 배열에 저장
+# ──────────────────────────────────────────────────
+_cc_expand_flags() {
+    _cc_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --discord) _cc_args+=(--channels "plugin:discord@claude-plugins-official") ;;
+            *)         _cc_args+=("$1") ;;
+        esac
+        shift
+    done
+}
+
+# ──────────────────────────────────────────────────
 # cc go <path> [claude-opts...]
 # ──────────────────────────────────────────────────
 _cc_go() {
@@ -26,7 +41,8 @@ _cc_go() {
         return 1
     fi
 
-    cd "$target" && claude "$@"
+    _cc_expand_flags "$@"
+    cd "$target" && claude "${_cc_args[@]}"
 }
 
 # ──────────────────────────────────────────────────
@@ -84,7 +100,8 @@ _cc_worktree() {
     # If worktree already exists, reuse it
     if [[ -d "$wt_dest" ]]; then
         echo "cc: reusing existing worktree: $wt_dest"
-        cd "$wt_dest" && claude "$@"
+        _cc_expand_flags "$@"
+        cd "$wt_dest" && claude "${_cc_args[@]}"
         return $?
     fi
 
@@ -122,7 +139,8 @@ _cc_worktree() {
     cd "$wt_dest"
 
     # Start Claude session (prompt for cleanup on exit)
-    claude "$@"
+    _cc_expand_flags "$@"
+    claude "${_cc_args[@]}"
 
     # After session ends, offer to remove worktree
     echo ""
@@ -202,6 +220,9 @@ Usage:
   cc install                        Install/update Claude Code to latest version
   cc help                           Show this help
 
+cc options (expanded before passing to claude):
+  --discord                         Enable Discord channel (--channels plugin:discord@claude-plugins-official)
+
 Subcommand details:
 
   cc go <path>
@@ -241,6 +262,6 @@ cc() {
         clean)   _cc_clean ;;
         install) curl -fsSL https://claude.ai/install.sh | bash ;;
         help)    _cc_help ;;
-        *)       claude "$@" ;;
+        *)       _cc_expand_flags "$@"; claude "${_cc_args[@]}" ;;
     esac
 }
