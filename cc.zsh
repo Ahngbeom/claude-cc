@@ -21,6 +21,18 @@ __cc_mtime() {
     stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
 }
 
+# PATH에서 디렉터리의 1-based 순번. 없으면 0.
+# 존재 여부가 아니라 순번이 필요한 이유: 같은 이름의 shim이 둘 이상 올라왔을 때
+# 실제로 실행되는 건 앞선 쪽이고, 그게 진단에서 알고 싶은 정보다.
+__cc_path_index() {
+    local dir="$1" i=1 e
+    for e in ${(s.:.)PATH}; do
+        [[ "$e" == "$dir" ]] && { print -r -- $i; return }
+        (( i++ ))
+    done
+    print -r -- 0
+}
+
 # 이 파일 자신의 경로와 로드 시각.
 # cc는 셸 함수라 한 번 로드되면 파일을 고쳐도 기존 셸에는 반영되지 않는다.
 # cc doctor의 stale 감지, cc reload, 그리고 cc()의 자가 복구가 이 값을 쓴다.
@@ -377,12 +389,75 @@ __cc_doctor() {
         __cc_doctor_ok "tmux → real tmux: $tmux_bin (expected outside a teams session)"
     fi
 
-    if [[ -e "$orca_shim" ]]; then
-        if [[ ":$PATH:" == *":${orca_shim:h}:"* ]]; then
-            __cc_doctor_warn "Orca agent-teams shim dir is on PATH: ${orca_shim:h}"
+    print -r -- ""
+    print -r -- "── coexistence (cmux / Orca) ──"
+
+    # 어느 앱이 이 터미널을 소유하는가. 교차 실행이면 팀메이트 분할이
+    # 눈에 보이지 않는 다른 앱의 창으로 간다.
+    local in_cmux=0 in_orca=0
+    [[ -n "${CMUX_SURFACE_ID:-}" ]] && in_cmux=1
+    [[ -n "${ORCA_PANE_KEY:-}${ORCA_WORKTREE_ID:-}" ]] && in_orca=1
+
+    if (( in_cmux && in_orca )); then
+        __cc_doctor_warn "terminal reports BOTH cmux and Orca ownership — teammate splits may land in the wrong app"
+    elif (( in_cmux )); then
+        __cc_doctor_ok "terminal owner: cmux"
+    elif (( in_orca )); then
+        __cc_doctor_warn "terminal owner: Orca — 'cc --teams' would split into a cmux window not visible here"
+    else
+        __cc_doctor_ok "terminal owner: neither (plain terminal)"
+    fi
+
+    # 두 앱이 agent teams용으로 같은 'tmux' 이름을 선점한다. 평소엔 어느 쪽도
+    # PATH에 없어 무해하지만, 둘 다 올라오면 앞선 쪽이 팀메이트 생성을 가져간다.
+    local cmux_shim="$HOME/.cmuxterm/claude-teams-bin/tmux"
+    local ci oi
+    ci=$(__cc_path_index "${cmux_shim:h}")
+    oi=$(__cc_path_index "${orca_shim:h}")
+    if (( ci && oi )); then
+        if (( ci < oi )); then
+            __cc_doctor_warn "both teams shims on PATH — cmux wins (position $ci vs Orca $oi)"
         else
-            __cc_doctor_ok "Orca agent-teams shim present but off PATH: $orca_shim"
+            __cc_doctor_warn "both teams shims on PATH — Orca wins (position $oi vs cmux $ci)"
         fi
+    elif (( ci )); then
+        __cc_doctor_ok "cmux teams shim on PATH (position $ci)"
+    elif (( oi )); then
+        __cc_doctor_warn "Orca teams shim on PATH (position $oi) — teammate spawns route to Orca"
+    else
+        __cc_doctor_ok "neither teams shim on PATH (expected outside a teams session)"
+    fi
+    [[ -e "$cmux_shim" ]] || __cc_doctor_na "cmux teams shim not installed yet: $cmux_shim"
+    [[ -e "$orca_shim" ]] || __cc_doctor_na "Orca teams shim not installed: $orca_shim"
+
+    # 같은 레포를 양쪽이 관리하면 'cc wt'가 git의 already-checked-out으로 막히고,
+    # 'cc clean'의 prune이 Orca 등록을 건드릴 수 있다.
+    if command -v orca &>/dev/null; then
+        local orca_out
+        if command -v timeout &>/dev/null; then
+            orca_out="$(timeout 10 orca worktree list 2>/dev/null)"
+        else
+            orca_out="$(orca worktree list 2>/dev/null)"
+        fi
+        if [[ -z "$orca_out" ]]; then
+            __cc_doctor_na "orca worktree list returned nothing (Orca not running?)"
+        else
+            local overlap=0 oline op
+            for oline in ${(f)orca_out}; do
+                for op in ${=oline}; do
+                    case "$op" in
+                        "$__CC_WT_BASE"/*|"$__CC_PROJECT_BASE"/*) (( overlap++ )) ;;
+                    esac
+                done
+            done
+            if (( overlap )); then
+                __cc_doctor_warn "Orca manages $overlap path(s) under CC_PROJECT_BASE/CC_WT_BASE — 'cc wt' and 'cc clean' can collide there"
+            else
+                __cc_doctor_ok "no Orca worktree under CC_PROJECT_BASE/CC_WT_BASE"
+            fi
+        fi
+    else
+        __cc_doctor_na "orca CLI not found — coexistence checks limited to PATH/env"
     fi
 
     print -r -- ""
@@ -541,6 +616,11 @@ Subcommand details:
     a cmux surface, which tmux the PATH resolves to (cmux shim vs Orca shim vs
     real tmux), and the relevant ~/.claude/settings.json keys.
 
+    It also reports coexistence with Orca, which ships a competing agent-teams
+    tmux shim: who owns this terminal, which of the two shims wins on PATH, and
+    whether Orca manages any worktree under CC_PROJECT_BASE / CC_WT_BASE (where
+    'cc wt' and 'cc clean' would collide with it).
+
     The teams env vars (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, TMUX) only exist
     inside the claude process cmux spawns, never in the shell that launched it.
     So doctor runs a live probe: it swaps in a stand-in for claude via
@@ -599,7 +679,17 @@ cc() {
             return 1
         fi
         if [[ -z "${CMUX_SURFACE_ID:-}" ]]; then
-            echo "cc: warning — not inside a cmux surface; teammate splits may not appear" >&2
+            if [[ -n "${ORCA_PANE_KEY:-}${ORCA_WORKTREE_ID:-}" ]]; then
+                # 두 앱이 agent teams용으로 같은 'tmux' 이름을 쓴다. cmux가 자기 shim을
+                # PATH 앞에 붙이므로 Orca 터미널에서 실행해도 cmux가 이기고, 분할은
+                # 이 창이 아닌 cmux 쪽에 열린다. 막지는 않는다 — 의도적인 경우도 있다.
+                echo "cc: this is an Orca-managed terminal, not a cmux surface." >&2
+                echo "    --teams still runs, but cmux puts its own tmux shim ahead of Orca's," >&2
+                echo "    so teammate panes open in a cmux window you cannot see from here." >&2
+                echo "    Run it from a cmux pane instead." >&2
+            else
+                echo "cc: warning — not inside a cmux surface; teammate splits may not appear" >&2
+            fi
         fi
     fi
 
