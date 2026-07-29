@@ -13,8 +13,19 @@ A lightweight zsh wrapper around [Claude Code CLI](https://claude.ai/code) that 
 | `cc wt <branch>` | Create (or reuse) a git worktree and start Claude there |
 | `cc wt <project> <branch>` | Same, but for a named project under `$CC_PROJECT_BASE` |
 | `cc clean` | List managed worktrees and prune stale ones |
+| `cc doctor [--no-probe]` | Diagnose the agent-teams environment |
+| `cc reload` | Re-source `cc.zsh` into the current shell |
 | `cc install` | Install / update Claude Code to latest |
 | `cc help` | Show inline help with current config paths |
+
+### Flags
+
+These are consumed by `cc` and expanded before the rest is passed to `claude`. They combine with any subcommand — e.g. `cc go ~/projects/my-app --teams`.
+
+| Flag | Expands to |
+|------|-----------|
+| `--teams` | Launches via `cmux claude-teams` instead of `claude`, enabling agent teams so every **named** teammate opens in its own split pane. Shorthand alias: `cct` |
+| `--discord` | `--channels plugin:discord@claude-plugins-official` |
 
 ---
 
@@ -78,6 +89,8 @@ source ~/.config/zsh/claude-cc/cc.zsh
 
 `cc help` always shows the currently active values.
 
+`cc.zsh` also exports **`CC_SELF`** — the path to the file it was sourced from. `cc reload` and the self-repair path in `cc()` use it to find themselves again. You don't need to set it; do so only if `cc.zsh` is loaded in a way that hides its own path (e.g. via `eval`).
+
 ---
 
 ## Usage examples
@@ -103,6 +116,14 @@ cc wt my-app feature/my-feature --model opus
 
 # List all managed worktrees and optionally prune them
 cc clean
+
+# Start a session with agent teams (named teammates get their own split panes)
+cct                          # same as: cc --teams
+cc wt feature/my-feature --teams
+
+# Check why agent teams isn't behaving; exit code = number of failures
+cc doctor
+cc doctor --no-probe         # skip the live cmux probe
 ```
 
 ### Worktree lifecycle
@@ -130,6 +151,10 @@ git -C ~/.config/zsh/claude-cc pull
 curl -fsSL https://raw.githubusercontent.com/Ahngbeom/claude-cc/main/install.sh | bash
 ```
 
+`cc` is a shell function, so pulling a new version does **not** affect shells that already
+loaded it — they keep running the old definition. Run `cc reload` in each open shell, or just
+start a new one. `cc doctor` reports this situation as stale.
+
 ---
 
 ## Requirements
@@ -137,6 +162,7 @@ curl -fsSL https://raw.githubusercontent.com/Ahngbeom/claude-cc/main/install.sh 
 - **zsh** (tested on zsh 5.9+)
 - **git** (for worktree commands)
 - **Claude Code CLI** — install with `cc install` or follow [official docs](https://claude.ai/code)
+- **cmux CLI** — only for `--teams` / `cct`; `cc doctor` also uses it for its live probe. Everything else works without it.
 
 ---
 
@@ -179,8 +205,25 @@ source ~/.config/zsh/claude-cc/cc.zsh
 | `cc wt <브랜치>` | Worktree 생성(또는 재사용) 후 Claude 시작 |
 | `cc wt <프로젝트> <브랜치>` | 지정 프로젝트에서 Worktree 생성 |
 | `cc clean` | Worktree 목록 확인 및 prune |
+| `cc doctor [--no-probe]` | agent teams 환경 진단 (종료코드 = 실패 개수) |
+| `cc reload` | 현재 셸에 `cc.zsh`를 다시 읽어들임 |
 | `cc help` | 도움말 및 현재 설정 경로 출력 |
 
 `cc help`를 실행하면 현재 `CC_PROJECT_BASE`, `CC_WT_BASE` 값을 확인할 수 있습니다.
+
+### 전용 플래그
+
+`cc`가 먼저 해석한 뒤 나머지를 `claude`에 넘깁니다. 모든 서브커맨드와 조합됩니다 (예: `cc go ~/projects/my-app --teams`).
+
+| 플래그 | 동작 |
+|--------|------|
+| `--teams` | `claude` 대신 `cmux claude-teams`로 실행합니다. agent teams가 켜지고 **이름이 붙은** 팀원이 각자 분할 페인에서 열립니다. 축약 별칭: `cct` |
+| `--discord` | `--channels plugin:discord@claude-plugins-official` 로 확장됩니다 |
+
+`--teams`와 `cc doctor`의 live probe는 **cmux CLI**가 필요합니다. 나머지 기능은 없어도 동작합니다.
+
+### 새 버전 반영
+
+`cc`는 셸 함수라서 `git pull`을 해도 **이미 로드된 셸에는 반영되지 않습니다.** 열려 있는 셸에서 `cc reload`를 실행하거나 새 셸을 여세요. `cc doctor`가 이 상태를 stale로 보고합니다.
 
 </details>
