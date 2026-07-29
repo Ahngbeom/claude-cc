@@ -24,7 +24,7 @@ These are consumed by `cc` and expanded before the rest is passed to `claude`. T
 
 | Flag | Expands to |
 |------|-----------|
-| `--teams` | Launches via `cmux claude-teams` instead of `claude`, enabling agent teams so every **named** teammate opens in its own split pane. Shorthand alias: `cct` |
+| `--teams` | Launches via `cmux claude-teams` instead of `claude`, enabling agent teams so every **named** teammate opens in its own split pane. Also appends `--permission-mode default` unless you pass a `--permission-mode` of your own — teammates are never spawned while the session is in plan mode, so inheriting `permissions.defaultMode: plan` would leave a teams session unable to do the one thing it was launched for. Shorthand alias: `cct` |
 | `--discord` | `--channels plugin:discord@claude-plugins-official` |
 
 ---
@@ -118,7 +118,8 @@ cc wt my-app feature/my-feature --model opus
 cc clean
 
 # Start a session with agent teams (named teammates get their own split panes)
-cct                          # same as: cc --teams
+cct                          # same as: cc --teams  (adds --permission-mode default)
+cct --permission-mode plan   # opt out of that override
 cc wt feature/my-feature --teams
 
 # Check why agent teams isn't behaving; exit code = number of failures
@@ -217,7 +218,7 @@ source ~/.config/zsh/claude-cc/cc.zsh
 
 | 플래그 | 동작 |
 |--------|------|
-| `--teams` | `claude` 대신 `cmux claude-teams`로 실행합니다. agent teams가 켜지고 **이름이 붙은** 팀원이 각자 분할 페인에서 열립니다. 축약 별칭: `cct` |
+| `--teams` | `claude` 대신 `cmux claude-teams`로 실행합니다. agent teams가 켜지고 **이름이 붙은** 팀원이 각자 분할 페인에서 열립니다. `--permission-mode`를 직접 주지 않으면 `--permission-mode default`도 함께 붙습니다 — plan 모드에서는 팀원이 생성되지 않으므로, `permissions.defaultMode: plan`을 그대로 물려받으면 teams 세션이 정작 아무것도 못 합니다. 해제하려면 `cct --permission-mode plan`. 축약 별칭: `cct` |
 | `--discord` | `--channels plugin:discord@claude-plugins-official` 로 확장됩니다 |
 
 `--teams`와 `cc doctor`의 live probe는 **cmux CLI**가 필요합니다. 나머지 기능은 없어도 동작합니다.

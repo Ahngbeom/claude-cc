@@ -43,14 +43,33 @@ __CC_LOADED_MTIME="$(__cc_mtime "$CC_SELF" 2>/dev/null)"
 __cc_expand_flags() {
     __cc_args=()
     __cc_launcher=(claude)   # 호출마다 초기화 — 이전 호출의 teams 상태가 새지 않도록
+    # teams 여부를 __cc_launcher 내용으로 추론하지 않는다. 런처 형태가 바뀌면
+    # 판정이 조용히 깨지므로 별도 플래그로 들고 간다.
+    local teams=0 pm_seen=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --teams)   __cc_launcher=(cmux claude-teams) ;;
+            --teams)   __cc_launcher=(cmux claude-teams); teams=1 ;;
             --discord) __cc_args+=(--channels "plugin:discord@claude-plugins-official") ;;
+            --permission-mode)
+                # 값까지 같이 넘긴다. 값 누락은 claude의 인자 검증에 맡긴다.
+                pm_seen=1
+                __cc_args+=("$1")
+                if [[ $# -ge 2 ]]; then __cc_args+=("$2"); shift; fi
+                ;;
+            --permission-mode=*)
+                pm_seen=1
+                __cc_args+=("$1")
+                ;;
             *)         __cc_args+=("$1") ;;
         esac
         shift
     done
+
+    # teams는 plan 모드에서 팀메이트를 띄우지 않는다. settings의
+    # permissions.defaultMode(=plan)를 덮되, 사용자가 직접 지정했으면 건드리지 않는다.
+    if (( teams && ! pm_seen )); then
+        __cc_args+=(--permission-mode default)
+    fi
 }
 
 # ──────────────────────────────────────────────────
@@ -402,7 +421,9 @@ __cc_doctor() {
                 __cc_doctor_warn "teammateMode=$tm (use \"auto\" so named teammates open their own panes)"
             fi
             if [[ "$dm" == plan ]]; then
-                __cc_doctor_warn "permissions.defaultMode=plan (sessions start read-only; teammates stay unspawned until you leave plan mode)"
+                __cc_doctor_warn "permissions.defaultMode=plan — plain 'cc' sessions start read-only"
+                print -r -- "       'cc --teams' / 'cct' override it with --permission-mode default,"
+                print -r -- "       because teammates are not spawned while in plan mode."
             else
                 __cc_doctor_ok "permissions.defaultMode=$dm"
             fi
@@ -461,11 +482,13 @@ __cc_doctor() {
     fi
 
     print -r -- ""
-    print -r -- "── known limitations ──"
-    print -r -- "       cmux's tmux shim rejects 'new-session -A' and 'new-window -t'."
-    print -r -- "       This only matters once the probe above is all [OK]: if the environment"
-    print -r -- "       is correct and panes still don't open, capture the error and report it"
-    print -r -- "       against cmux — it is not a cc configuration problem."
+    print -r -- "── notes ──"
+    print -r -- "       Teammates spawn via 'tmux split-window … -P -F #{pane_id}'."
+    print -r -- "       cmux's shim answers that family (verified: 'tmux list-panes' → %<id>)."
+    print -r -- "       The forms cmux rejects — 'new-session -A', 'new-window -t' — are not"
+    print -r -- "       used by claude's teammate path, so they are not a concern here."
+    print -r -- "       If panes still don't open with a green probe, capture the shim error"
+    print -r -- "       and report it against cmux — it is not a cc configuration problem."
 
     print -r -- ""
     print -r -- "summary: $fails fail, $warns warn"
@@ -535,6 +558,12 @@ Subcommand details:
     CLI, and works best from inside a cmux surface. Combines with the other
     subcommands, e.g. 'cc go ~/projects/my-app --teams'.
     Shorthand alias: cct
+
+    Adds --permission-mode default unless you pass a --permission-mode yourself.
+    Teammates are not spawned while in plan mode, and this machine's
+    permissions.defaultMode is 'plan', so without the override a teams session
+    would start unable to do the very thing it was launched for.
+    To opt out:  cct --permission-mode plan
 
   cc doctor [--no-probe]
     Checks everything agent teams depends on: the cmux CLI, whether this shell is
