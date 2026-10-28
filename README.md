@@ -1,6 +1,6 @@
 # cc — Claude Code wrapper for zsh
 
-A lightweight zsh wrapper around [Claude Code CLI](https://claude.ai/code) that adds **worktree-based branch isolation**, project navigation, and session cleanup — without replacing the native `claude` command.
+A lightweight wrapper around [Claude Code CLI](https://claude.ai/code) for **zsh and bash** that adds **worktree-based branch isolation**, project navigation, and session cleanup — without replacing the native `claude` command.
 
 ---
 
@@ -9,14 +9,15 @@ A lightweight zsh wrapper around [Claude Code CLI](https://claude.ai/code) that 
 | Command | Description |
 |---------|-------------|
 | `cc [opts...]` | Start Claude in the current directory (passthrough to `claude`) |
-| `cc go <path>` | `cd` to a path and start Claude |
+| `cc go <path>` | Start Claude in a path |
 | `cc wt <branch>` | Create (or reuse) a git worktree and start Claude there |
 | `cc wt <project> <branch>` | Same, but for a named project under `$CC_PROJECT_BASE` |
 | `cc clean` | List managed worktrees and prune stale ones |
 | `cc doctor [--no-probe]` | Diagnose the agent-teams environment |
-| `cc reload` | Re-source `cc.zsh` into the current shell |
 | `cc install` | Install / update Claude Code to latest |
 | `cc help` | Show inline help with current config paths |
+
+`cc` runs Claude in a child process, so `cc go` and `cc wt` never change the directory of the shell you typed them in — when Claude exits, you are back where you started.
 
 ### Flags
 
@@ -51,7 +52,7 @@ These are consumed by `cc` and expanded before the rest is passed to `claude`. T
 curl -fsSL https://raw.githubusercontent.com/Ahngbeom/claude-cc/main/install.sh | bash
 ```
 
-Installs to `~/.config/zsh/claude-cc/` and adds a `source` line to `~/.zshrc`.
+Installs to `~/.config/zsh/claude-cc/` and adds a `source` line to `~/.zshrc` and/or `~/.bashrc` — whichever matches your login shell or already exists.
 
 ### Oh My Zsh
 
@@ -70,26 +71,24 @@ plugins=(... cc)
 
 ```bash
 git clone --depth 1 https://github.com/Ahngbeom/claude-cc.git ~/.config/zsh/claude-cc
-echo 'source ~/.config/zsh/claude-cc/cc.zsh' >> ~/.zshrc
-source ~/.zshrc
+echo 'source ~/.config/zsh/claude-cc/cc.zsh' >> ~/.zshrc     # zsh
+echo 'source ~/.config/zsh/claude-cc/cc.bash' >> ~/.bashrc   # bash
 ```
+
+Then open a new shell. Other shells (fish, scripts) can run `~/.config/zsh/claude-cc/bin/claude-cc` directly — it takes the same arguments as `cc`.
 
 ---
 
 ## Configuration
 
-Set these **before** sourcing `cc.zsh` (e.g. in `~/.zshrc`):
+Set these in your rc file (`~/.zshrc` or `~/.bashrc`):
 
 ```zsh
 export CC_PROJECT_BASE="$HOME/projects"    # where your repos live (default: ~/projects)
 export CC_WT_BASE="$HOME/worktrees"        # where worktrees are created (default: ~/worktrees)
-
-source ~/.config/zsh/claude-cc/cc.zsh
 ```
 
-`cc help` always shows the currently active values.
-
-`cc.zsh` also exports **`CC_SELF`** — the path to the file it was sourced from. `cc reload` and the self-repair path in `cc()` use it to find themselves again. You don't need to set it; do so only if `cc.zsh` is loaded in a way that hides its own path (e.g. via `eval`).
+They are read on every `cc` call, so changing them takes effect immediately. `cc help` always shows the currently active values.
 
 ---
 
@@ -133,8 +132,7 @@ cc doctor --no-probe         # skip the live cmux probe
 cc wt my-app feature/my-feature
   ↓  fetches origin
   ↓  creates ~/worktrees/my-app/feature/my-feature  (or reuses if it exists)
-  ↓  cd into worktree
-  ↓  starts claude
+  ↓  starts claude in the worktree
   ↓  [you work in Claude...]
   ↓  claude exits
   ↓  "Remove this worktree? [y/N]"
@@ -152,18 +150,32 @@ git -C ~/.config/zsh/claude-cc pull
 curl -fsSL https://raw.githubusercontent.com/Ahngbeom/claude-cc/main/install.sh | bash
 ```
 
-`cc` is a shell function, so pulling a new version does **not** affect shells that already
-loaded it — they keep running the old definition. Run `cc reload` in each open shell, or just
-start a new one. `cc doctor` reports this situation as stale.
+Every `cc` call runs the current `bin/claude-cc`, so an update takes effect in open shells right away.
+
+**Upgrading from a zsh-only version:** shells that were already open still hold the old `cc`
+function. Run `cc reload` once in each of them, or open a new shell.
 
 ---
 
 ## Requirements
 
-- **zsh** (tested on zsh 5.9+)
+- **zsh** (5.x) or **bash** (3.2+, so macOS `/bin/bash` works)
 - **git** (for worktree commands)
+- **python3** — only for the settings check in `cc doctor`
 - **Claude Code CLI** — install with `cc install` or follow [official docs](https://claude.ai/code)
 - **cmux CLI** — only for `--teams` / `cct`; `cc doctor` also uses it for its live probe. Everything else works without it.
+
+---
+
+## Development
+
+```bash
+tests/run.sh            # every shell whose shim exists and binary is installed
+tests/run.sh bash       # one shell
+TEST_BASH=/bin/bash tests/run.sh   # pin the bash that bin/claude-cc runs under
+```
+
+The suite uses stub `claude` / `cmux` binaries and a throwaway `HOME`, so it never starts a real session. CI runs it on Linux and macOS (including `/bin/bash` 3.2).
 
 ---
 
@@ -178,7 +190,7 @@ MIT — see [LICENSE](./LICENSE)
 
 ## cc — Claude Code zsh 래퍼
 
-Claude Code CLI를 감싸는 경량 zsh 함수입니다. **git worktree 기반 브랜치 격리**, 프로젝트 이동, 세션 정리 기능을 추가합니다.
+Claude Code CLI를 감싸는 경량 래퍼입니다. zsh와 bash에서 동작하며, **git worktree 기반 브랜치 격리**, 프로젝트 이동, 세션 정리 기능을 추가합니다.
 
 ### 설치
 
@@ -186,15 +198,15 @@ Claude Code CLI를 감싸는 경량 zsh 함수입니다. **git worktree 기반 �
 curl -fsSL https://raw.githubusercontent.com/Ahngbeom/claude-cc/main/install.sh | bash
 ```
 
+로그인 셸에 맞는 rc 파일, 또는 이미 있는 rc 파일(`~/.zshrc`, `~/.bashrc`)에 source 줄을 추가합니다. 수동으로 설치한다면 zsh는 `cc.zsh`를, bash는 `cc.bash`를 source합니다. 그 밖의 셸에서는 `bin/claude-cc`를 직접 실행합니다.
+
 ### 설정
 
-`~/.zshrc`에서 `cc.zsh`를 source하기 전에 환경변수를 설정합니다:
+rc 파일(`~/.zshrc` 또는 `~/.bashrc`)에서 환경변수를 설정합니다. `cc`를 호출할 때마다 새로 읽으므로 바꾸면 바로 반영됩니다:
 
 ```zsh
 export CC_PROJECT_BASE="$HOME/Flyingdoctor"   # 프로젝트 루트
 export CC_WT_BASE="$HOME/Flyingdoctor/worktrees"  # worktree 저장 위치
-
-source ~/.config/zsh/claude-cc/cc.zsh
 ```
 
 ### 주요 커맨드
@@ -202,13 +214,14 @@ source ~/.config/zsh/claude-cc/cc.zsh
 | 커맨드 | 설명 |
 |--------|------|
 | `cc` | 현재 디렉토리에서 Claude 세션 시작 |
-| `cc go <경로>` | 경로로 이동 후 Claude 시작 |
+| `cc go <경로>` | 해당 경로에서 Claude 시작 |
 | `cc wt <브랜치>` | Worktree 생성(또는 재사용) 후 Claude 시작 |
 | `cc wt <프로젝트> <브랜치>` | 지정 프로젝트에서 Worktree 생성 |
 | `cc clean` | Worktree 목록 확인 및 prune |
 | `cc doctor [--no-probe]` | agent teams 환경 진단 (종료코드 = 실패 개수) |
-| `cc reload` | 현재 셸에 `cc.zsh`를 다시 읽어들임 |
 | `cc help` | 도움말 및 현재 설정 경로 출력 |
+
+Claude는 자식 프로세스에서 실행됩니다. 그래서 `cc go`나 `cc wt`를 실행해도 그 명령을 입력한 셸의 디렉터리는 바뀌지 않고, Claude를 종료하면 원래 위치로 돌아옵니다.
 
 `cc help`를 실행하면 현재 `CC_PROJECT_BASE`, `CC_WT_BASE` 값을 확인할 수 있습니다.
 
@@ -225,6 +238,14 @@ source ~/.config/zsh/claude-cc/cc.zsh
 
 ### 새 버전 반영
 
-`cc`는 셸 함수라서 `git pull`을 해도 **이미 로드된 셸에는 반영되지 않습니다.** 열려 있는 셸에서 `cc reload`를 실행하거나 새 셸을 여세요. `cc doctor`가 이 상태를 stale로 보고합니다.
+`cc`는 호출할 때마다 현재의 `bin/claude-cc`를 실행하므로, 업데이트하면 열려 있는 셸에도 바로 반영됩니다.
+
+**zsh 전용 버전에서 업그레이드할 때:** 이미 열려 있던 셸에는 옛 `cc` 함수가 남아 있습니다. 각 셸에서 `cc reload`를 한 번 실행하거나 새 셸을 여세요.
+
+### 요구 사항
+
+- zsh 5.x 또는 bash 3.2 이상(macOS `/bin/bash` 포함)
+- git
+- python3(`cc doctor`의 설정 점검에만 필요)
 
 </details>

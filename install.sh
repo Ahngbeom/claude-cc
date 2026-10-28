@@ -7,7 +7,8 @@ set -euo pipefail
 INSTALL_DIR="${CC_INSTALL_DIR:-$HOME/.config/zsh/claude-cc}"
 REPO_URL="https://github.com/Ahngbeom/claude-cc.git"
 ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
-SOURCE_LINE="source \"$INSTALL_DIR/cc.zsh\""
+BASHRC="$HOME/.bashrc"
+LOGIN_SHELL="$(basename "${SHELL:-}")"
 
 echo "cc installer"
 echo "============"
@@ -23,14 +24,38 @@ else
     git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
 fi
 
-# ── .zshrc update ───────────────────────────────────
-if grep -qF "$SOURCE_LINE" "$ZSHRC" 2>/dev/null; then
-    echo "→ .zshrc already sources cc.zsh — skipping."
-else
-    echo "" >> "$ZSHRC"
-    echo "# cc — Claude Code wrapper (https://github.com/Ahngbeom/claude-cc)" >> "$ZSHRC"
-    echo "$SOURCE_LINE" >> "$ZSHRC"
-    echo "→ Added source line to $ZSHRC"
+# ── rc file update ──────────────────────────────────
+add_source_line() {
+    local rc="$1" line="source \"$INSTALL_DIR/$2\""
+    if grep -qF "$line" "$rc" 2>/dev/null; then
+        echo "→ $rc already sources $2 — skipping."
+    else
+        {
+            echo ""
+            echo "# cc — Claude Code wrapper (https://github.com/Ahngbeom/claude-cc)"
+            echo "$line"
+        } >> "$rc"
+        echo "→ Added source line to $rc"
+    fi
+}
+
+configured=0
+if [[ "$LOGIN_SHELL" == zsh || -f "$ZSHRC" ]]; then
+    add_source_line "$ZSHRC" cc.zsh
+    configured=1
+fi
+if [[ "$LOGIN_SHELL" == bash || -f "$BASHRC" ]]; then
+    add_source_line "$BASHRC" cc.bash
+    configured=1
+    if [[ "$LOGIN_SHELL" == bash && "$(uname -s)" == Darwin ]]; then
+        echo "  macOS bash login shells read ~/.bash_profile — make sure it sources ~/.bashrc."
+    fi
+fi
+if (( ! configured )); then
+    echo "→ No zsh or bash rc file found. Add one of these to your shell's rc file:"
+    echo "    source \"$INSTALL_DIR/cc.zsh\"    # zsh"
+    echo "    source \"$INSTALL_DIR/cc.bash\"   # bash"
+    echo "  Other shells can run $INSTALL_DIR/bin/claude-cc directly."
 fi
 
 # ── Oh My Zsh hint ──────────────────────────────────
@@ -42,9 +67,8 @@ if [[ -n "${ZSH_CUSTOM:-}" ]]; then
 fi
 
 echo ""
-echo "Done! Restart your shell or run:"
-echo "  source $INSTALL_DIR/cc.zsh"
+echo "Done! Open a new shell to start using cc."
 echo ""
-echo "Optional: set these in .zshrc before the source line to customize paths:"
+echo "Optional: set these in your rc file to customize paths:"
 echo "  export CC_PROJECT_BASE=\"\$HOME/my-projects\""
 echo "  export CC_WT_BASE=\"\$HOME/my-worktrees\""
