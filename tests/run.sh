@@ -101,6 +101,8 @@ EOF
     git -C "$SB/projects/demo" commit -q --allow-empty -m init
     git -C "$SB/projects/demo" remote add origin "$SB/origin.git"
     git -C "$SB/projects/demo" push -q origin HEAD:refs/heads/main HEAD:refs/heads/remote-only
+    git init -q "$HOME/tilde-repo"
+    git -C "$HOME/tilde-repo" commit -q --allow-empty -m init
     mkdir -p "$SB/projects/notrepo"
 }
 
@@ -203,6 +205,11 @@ arg=[opus]"
     run_in "$SB" $'n\n' wt demo remote-only
     expect_eq "wt checks out a remote-only branch" "$(branch_of "$wt/remote-only")" remote-only
 
+    # shellcheck disable=SC2088
+    run_in "$SB" $'n\n' wt '~/tilde-repo' t/b
+    expect_line "wt expands a quoted ~ project path" "$OUT" \
+        "FAKE-CLAUDE cwd=$SB/worktrees/tilde-repo/t/b"
+
     run_in "$SB" "" wt notrepo b
     expect_eq "wt on a non-repo rc" "$RC" 1
     expect_contains "wt on a non-repo message" "$OUT" "not a git repository"
@@ -263,6 +270,38 @@ test_snapshot_shell() {
     expect_contains "cc works from a snapshot shell" "$OUT" "── claude settings ──"
 }
 
+test_cct() {
+    OUT="$(PATH="$SB/cmuxbin:$PATH" CMUX_SURFACE_ID=test "$SH_BIN" "${SH_FLAGS[@]}" -c \
+        'source "$1"; shift; cct "$@"' cc-test "$SHIM" --model opus 2>&1)"
+    expect_line "cct launches through cmux" "$OUT" "FAKE-CMUX"
+    expect_contains "cct passes options and adds the permission mode" "$OUT" \
+        "arg=[--model]
+arg=[opus]
+arg=[--permission-mode]
+arg=[default]"
+}
+
+test_reload() {
+    run_in "$SB" "" reload
+    expect_eq "reload rc" "$RC" 0
+    expect_contains "reload says it is no longer needed" "$OUT" "no longer needed"
+}
+
+test_doctor_probe() {
+    with_cmux run_in "$SB" "" doctor
+    expect_contains "probe sees the teams env" "$OUT" \
+        "[OK]   teams mode sets CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+    expect_contains "probe sees TMUX" "$OUT" "[OK]   teams mode sets TMUX=/tmp/fake-cmux,1,0 (pane %1)"
+    expect_contains "probe sees the cmux tmux shim" "$OUT" \
+        "[OK]   tmux resolves to the cmux shim: $SB/cmux-cli-shims/run1/tmux"
+}
+
+test_doctor_version() {
+    run_in "$SB" "" doctor --no-probe
+    expect_contains "doctor reports the claude-cc it runs" "$OUT" "$ROOT/bin/claude-cc"
+    expect_not_contains "doctor has no stale check" "$OUT" "stale"
+}
+
 # ── driver ───────────────────────────────────────
 for v in CLAUDECODE CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS TMUX TMUX_PANE CMUX_SURFACE_ID \
     CMUX_WORKSPACE_ID ORCA_PANE_KEY ORCA_WORKTREE_ID CC_PROJECT_BASE CC_WT_BASE CC_SELF \
@@ -303,6 +342,10 @@ for SH_NAME in "${shells[@]}"; do
     test_doctor
     test_help
     test_snapshot_shell
+    test_cct
+    test_reload
+    test_doctor_probe
+    test_doctor_version
     (( fail == before )) && rm -rf "$SB" || printf '  sandbox kept: %s\n' "$SB"
     export HOME="$ORIG_HOME" PATH="$ORIG_PATH"
 done
