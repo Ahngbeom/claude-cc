@@ -1,0 +1,649 @@
+#!/usr/bin/env bash
+# claude-cc — Claude Code wrapper. cc.zsh / cc.bash expose it as `cc` and `cct`.
+# Subcommands: go, wt, clean, doctor, reload, install, help
+# All other arguments are passed directly to claude.
+#
+# bash 3.2 호환을 유지한다 (macOS /bin/bash). 연관 배열, mapfile, ${x,,} 금지.
+#
+# Configuration (environment):
+#   CC_PROJECT_BASE   default: ~/projects
+#   CC_WT_BASE        default: ~/worktrees
+
+WT_BASE="${CC_WT_BASE:-$HOME/worktrees}"
+PROJECT_BASE="${CC_PROJECT_BASE:-$HOME/projects}"
+SELF_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
+say() { printf '%s\n' "$@"; }
+
+# PATH에서 디렉터리의 1-based 순번. 없으면 0.
+# 존재 여부가 아니라 순번이 필요한 이유: 같은 이름의 shim이 둘 이상 올라왔을 때
+# 실제로 실행되는 건 앞선 쪽이고, 그게 진단에서 알고 싶은 정보다.
+path_index() {
+    local dir="$1" i=1 e IFS=:
+    for e in $PATH; do
+        [[ "$e" == "$dir" ]] && { say "$i"; return; }
+        i=$((i + 1))
+    done
+    say 0
+}
+
+# ──────────────────────────────────────────────────
+# expand_flags: cc 전용 플래그를 claude CLI 옵션으로 변환
+# 결과는 args 배열에, 런처는 launcher 배열에 저장
+# ──────────────────────────────────────────────────
+expand_flags() {
+    args=()
+    launcher=(claude)
+    # teams 여부를 launcher 내용으로 추론하지 않는다. 런처 형태가 바뀌면
+    # 판정이 조용히 깨지므로 별도 플래그로 들고 간다.
+    local teams=0 pm_seen=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --teams)   launcher=(cmux claude-teams); teams=1 ;;
+            --discord) args+=(--channels "plugin:discord@claude-plugins-official") ;;
+            --permission-mode)
+                # 값까지 같이 넘긴다. 값 누락은 claude의 인자 검증에 맡긴다.
+                pm_seen=1
+                args+=("$1")
+                if [[ $# -ge 2 ]]; then args+=("$2"); shift; fi
+                ;;
+            --permission-mode=*)
+                pm_seen=1
+                args+=("$1")
+                ;;
+            *)         args+=("$1") ;;
+        esac
+        shift
+    done
+
+    # teams는 plan 모드에서 팀메이트를 띄우지 않는다. settings의
+    # permissions.defaultMode(=plan)를 덮되, 사용자가 직접 지정했으면 건드리지 않는다.
+    if (( teams && ! pm_seen )); then
+        args+=(--permission-mode default)
+    fi
+}
+
+# ──────────────────────────────────────────────────
+# cc go <path> [claude-opts...]
+# ──────────────────────────────────────────────────
+cmd_go() {
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: cc go <path> [claude-opts...]" >&2
+        return 1
+    fi
+
+    local target="$1"
+    shift
+
+    if [[ ! -d "$target" ]]; then
+        echo "cc: path not found: $target" >&2
+        return 1
+    fi
+
+    expand_flags "$@"
+    cd "$target" && exec "${launcher[@]}" "${args[@]}"
+}
+
+# ──────────────────────────────────────────────────
+# cc wt [<project>] <branch> [claude-opts...]
+# ──────────────────────────────────────────────────
+cmd_wt() {
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: cc wt <branch> [claude-opts...]" >&2
+        echo "       cc wt <project> <branch> [claude-opts...]" >&2
+        echo "  branch:  feature/my-feature, fix/issue-123, etc." >&2
+        echo "  project: absolute path or name under \$CC_PROJECT_BASE (omit to use current dir)" >&2
+        return 1
+    fi
+
+    local project branch source_repo
+    if [[ $# -eq 1 ]] || [[ "$2" == -* ]]; then
+        # Single arg or second arg is a flag: cc wt <branch> [opts...]
+        branch="$1"
+        shift
+        source_repo="$PWD"
+        if ! git -C "$source_repo" rev-parse --git-dir &>/dev/null; then
+            echo "cc: current directory is not a git repository: $source_repo" >&2
+            return 1
+        fi
+    else
+        # Two or more args: cc wt <project> <branch> [opts...]
+        project="$1"
+        branch="$2"
+        shift 2
+
+        # shellcheck disable=SC2088
+        case "$project" in
+            /*)      source_repo="$project" ;;
+            "~")     source_repo="$HOME" ;;
+            "~/"*)   source_repo="$HOME/${project#"~/"}" ;;
+            *)       source_repo="$PROJECT_BASE/$project" ;;
+        esac
+    fi
+
+    if [[ ! -d "$source_repo" ]]; then
+        echo "cc: project path not found: $source_repo" >&2
+        return 1
+    fi
+
+    if ! git -C "$source_repo" rev-parse --git-dir &>/dev/null; then
+        echo "cc: not a git repository: $source_repo" >&2
+        return 1
+    fi
+
+    source_repo="${source_repo%/}"
+    local project_name="${source_repo##*/}"
+
+    # Worktree destination path (branch slashes map directly to subdirectories)
+    local wt_dest="$WT_BASE/$project_name/$branch"
+
+    if [[ -d "$wt_dest" ]]; then
+        echo "cc: reusing existing worktree: $wt_dest"
+        expand_flags "$@"
+        cd "$wt_dest" && exec "${launcher[@]}" "${args[@]}"
+        return 1
+    fi
+
+    echo "cc: creating worktree..."
+    echo "  source: $source_repo"
+    echo "  path:   $wt_dest"
+    echo "  branch: $branch"
+
+    mkdir -p "${wt_dest%/*}"
+
+    echo "cc: fetching from origin..."
+    git -C "$source_repo" fetch origin 2>/dev/null || true
+
+    local branch_exists=false
+    if git -C "$source_repo" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+        branch_exists=true
+    fi
+    if git -C "$source_repo" show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null; then
+        branch_exists=true
+    fi
+
+    if $branch_exists; then
+        git -C "$source_repo" worktree add "$wt_dest" "$branch" || return 1
+    else
+        echo "cc: branch '$branch' not found — creating from current HEAD"
+        git -C "$source_repo" worktree add -b "$branch" "$wt_dest" || return 1
+    fi
+
+    echo "cc: worktree ready → $wt_dest"
+    cd "$wt_dest" || return 1
+
+    expand_flags "$@"
+    "${launcher[@]}" "${args[@]}"
+
+    echo ""
+    printf 'cc: Remove this worktree? (%s) [y/N] ' "$wt_dest"
+    local answer
+    read -r answer
+    if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
+        cd "$source_repo" && git worktree remove "$wt_dest" && echo "cc: worktree removed."
+    else
+        echo "cc: worktree kept. To remove later: cc clean"
+        echo "    or: git -C \"$source_repo\" worktree remove \"$wt_dest\""
+    fi
+}
+
+# ──────────────────────────────────────────────────
+# cc clean
+# ──────────────────────────────────────────────────
+cmd_clean() {
+    if [[ ! -d "$WT_BASE" ]]; then
+        echo "cc: worktree base directory not found: $WT_BASE"
+        return 0
+    fi
+
+    echo "cc: scanning worktrees under $WT_BASE..."
+    echo ""
+
+    local found_any=false project_dir project_name source_repo
+    for project_dir in "$WT_BASE"/*/; do
+        [[ -d "$project_dir" ]] || continue
+        project_dir="${project_dir%/}"
+        project_name="${project_dir##*/}"
+        source_repo="$PROJECT_BASE/$project_name"
+
+        if [[ ! -d "$source_repo" ]]; then
+            echo "  [warning] source repo not found: $source_repo"
+            continue
+        fi
+
+        echo "  project: $project_name ($source_repo)"
+        git -C "$source_repo" worktree list
+        echo ""
+        found_any=true
+    done
+
+    if ! $found_any; then
+        echo "cc: no managed worktrees found."
+        return 0
+    fi
+
+    printf 'cc: Prune stale worktrees? [y/N] '
+    local answer
+    read -r answer
+    if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
+        for project_dir in "$WT_BASE"/*/; do
+            [[ -d "$project_dir" ]] || continue
+            project_dir="${project_dir%/}"
+            source_repo="$PROJECT_BASE/${project_dir##*/}"
+            [[ -d "$source_repo" ]] && git -C "$source_repo" worktree prune -v
+        done
+        echo "cc: prune complete."
+    else
+        echo "cc: cancelled."
+    fi
+}
+
+# ──────────────────────────────────────────────────
+# cc doctor — agent teams 환경 진단 (읽기 전용)
+#
+# 상태 출력 헬퍼. bash는 동적 스코프이므로 cmd_doctor의 local인
+# fails/warns 카운터를 여기서 그대로 증가시킬 수 있다.
+# ──────────────────────────────────────────────────
+doctor_ok()   { say "[OK]   $*"; }
+doctor_warn() { say "[WARN] $*"; warns=$((warns + 1)); }
+doctor_fail() { say "[FAIL] $*"; fails=$((fails + 1)); }
+doctor_na()   { say "[n/a]  $*"; }
+
+# ──────────────────────────────────────────────────
+# doctor_probe: teams 모드가 실제로 넘기는 환경을 찍어본다.
+#
+# cmux는 CMUX_CUSTOM_CLAUDE_PATH로 claude 실행 파일을 갈아끼울 수 있다.
+# 여기에 env를 출력하는 임시 스크립트를 꽂으면, 인터랙티브 세션을 열거나
+# 토큰을 쓰지 않고도 teams 모드의 env를 그대로 관찰할 수 있다.
+# cmux가 붙이는 인자(--settings, --teammate-mode 등)는 스크립트로
+# 넘어오지만 전부 무시한다.
+# ──────────────────────────────────────────────────
+doctor_probe() {
+    local probe out rc
+    probe="$(mktemp "${TMPDIR:-/tmp}/cc-doctor-probe.XXXXXX")" || return 1
+    cat >"$probe" <<'PROBE'
+#!/bin/sh
+printf 'teams=%s\n'    "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-}"
+printf 'tmux=%s\n'     "${TMUX:-}"
+printf 'pane=%s\n'     "${TMUX_PANE:-}"
+printf 'termprog=%s\n' "${TERM_PROGRAM:-}"
+printf 'tmuxbin=%s\n'  "$(command -v tmux 2>/dev/null)"
+PROBE
+    chmod +x "$probe"
+    if command -v timeout &>/dev/null; then
+        out="$(CMUX_CUSTOM_CLAUDE_PATH="$probe" timeout 30 cmux claude-teams 2>&1)"
+    else
+        out="$(CMUX_CUSTOM_CLAUDE_PATH="$probe" cmux claude-teams 2>&1)"
+    fi
+    rc=$?
+    rm -f "$probe"
+    say "$out"
+    return $rc
+}
+
+cmd_doctor() {
+    local run_probe=1
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-probe) run_probe=0 ;;
+            *) echo "cc doctor: unknown option '$1'" >&2; return 2 ;;
+        esac
+        shift
+    done
+
+    local fails=0 warns=0
+    local teams_on=0 in_claude=0
+    [[ -n "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-}" ]] && teams_on=1
+    # CLAUDECODE는 claude가 자식 프로세스에 넣는다. 셸 프롬프트에서는 없다.
+    [[ -n "${CLAUDECODE:-}" ]] && in_claude=1
+
+    say "── claude-cc ──"
+    local version
+    version="$(git -C "$SELF_DIR/.." describe --tags --always --dirty 2>/dev/null)"
+    if [[ -n "$version" ]]; then
+        doctor_ok "claude-cc $version ($SELF_DIR/claude-cc)"
+    else
+        doctor_na "claude-cc version unknown — not a git checkout ($SELF_DIR/claude-cc)"
+    fi
+
+    say "" "── cmux ──"
+    local cmux_bin
+    cmux_bin="$(command -v cmux 2>/dev/null)"
+    if [[ -n "$cmux_bin" ]]; then
+        doctor_ok "cmux CLI: $cmux_bin"
+    else
+        doctor_fail "cmux CLI not found on PATH — 'cc --teams' / 'cct' cannot work"
+    fi
+
+    if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
+        doctor_ok "inside a cmux surface (workspace ${CMUX_WORKSPACE_ID:-?})"
+    else
+        doctor_warn "not inside a cmux surface — teammate splits have nowhere to open"
+    fi
+
+    say "" "── current session ──"
+    if (( in_claude )); then
+        # Claude 프로세스 안이므로 teams env가 의미를 갖는다.
+        if (( teams_on )); then
+            doctor_ok "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=$CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
+        else
+            doctor_warn "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS unset — this Claude session has teams OFF"
+        fi
+        if [[ -n "${TMUX:-}" ]]; then
+            doctor_ok "TMUX=$TMUX (pane ${TMUX_PANE:-<unset>})"
+        else
+            doctor_warn "TMUX unset — teammate auto mode has no multiplexer to split"
+        fi
+        say "       TERM_PROGRAM=${TERM_PROGRAM:-<unset>}"
+        if (( ! teams_on )) && [[ -z "${TMUX:-}" ]]; then
+            say "       → teams: OFF for this session. Start a teams one with: cct"
+        fi
+    else
+        # cmux는 teams env를 자기가 exec하는 claude 프로세스에만 넣는다.
+        # 셸에서는 원리상 절대 보이지 않으므로 경고로 세지 않는다.
+        doctor_na "not inside a Claude session — teams env lives in the claude process,"
+        say "       never in the shell that launched it. Nothing to judge from here;" \
+            "       see the live probe below for what teams mode actually sets." \
+            "       TERM_PROGRAM=${TERM_PROGRAM:-<unset>}"
+    fi
+
+    say "" "── tmux resolution ──"
+    local tmux_bin orca_shim="$HOME/.orca/claude-agent-teams-bin/tmux"
+    tmux_bin="$(command -v tmux 2>/dev/null)"
+    if [[ -z "$tmux_bin" ]]; then
+        doctor_warn "no tmux on PATH"
+    elif [[ "$tmux_bin" == */cmux-cli-shims/* || "$tmux_bin" == *claude-teams-bin* ]]; then
+        # probe 쪽 판정과 같은 기준을 쓴다. cmux는 실행 경로에 따라 shim을
+        # $TMPDIR/cmux-cli-shims/ 또는 ~/.cmuxterm/claude-teams-bin/ 아래에 둔다.
+        doctor_ok "tmux → cmux shim: $tmux_bin"
+    elif [[ "$tmux_bin" == "$orca_shim" ]]; then
+        doctor_fail "tmux → Orca shim: $tmux_bin (teammate spawns route to Orca, not cmux)"
+    elif (( teams_on )); then
+        doctor_fail "tmux → real tmux: $tmux_bin (a teams session should resolve to the cmux shim)"
+    else
+        doctor_ok "tmux → real tmux: $tmux_bin (expected outside a teams session)"
+    fi
+
+    say "" "── coexistence (cmux / Orca) ──"
+
+    # 어느 앱이 이 터미널을 소유하는가. 교차 실행이면 팀메이트 분할이
+    # 눈에 보이지 않는 다른 앱의 창으로 간다.
+    local in_cmux=0 in_orca=0
+    [[ -n "${CMUX_SURFACE_ID:-}" ]] && in_cmux=1
+    [[ -n "${ORCA_PANE_KEY:-}${ORCA_WORKTREE_ID:-}" ]] && in_orca=1
+
+    if (( in_cmux && in_orca )); then
+        doctor_warn "terminal reports BOTH cmux and Orca ownership — teammate splits may land in the wrong app"
+    elif (( in_cmux )); then
+        doctor_ok "terminal owner: cmux"
+    elif (( in_orca )); then
+        doctor_warn "terminal owner: Orca — 'cc --teams' would split into a cmux window not visible here"
+    else
+        doctor_ok "terminal owner: neither (plain terminal)"
+    fi
+
+    # 두 앱이 agent teams용으로 같은 'tmux' 이름을 선점한다. 평소엔 어느 쪽도
+    # PATH에 없어 무해하지만, 둘 다 올라오면 앞선 쪽이 팀메이트 생성을 가져간다.
+    local cmux_shim="$HOME/.cmuxterm/claude-teams-bin/tmux"
+    local ci oi
+    ci=$(path_index "${cmux_shim%/*}")
+    oi=$(path_index "${orca_shim%/*}")
+    if (( ci && oi )); then
+        if (( ci < oi )); then
+            doctor_warn "both teams shims on PATH — cmux wins (position $ci vs Orca $oi)"
+        else
+            doctor_warn "both teams shims on PATH — Orca wins (position $oi vs cmux $ci)"
+        fi
+    elif (( ci )); then
+        doctor_ok "cmux teams shim on PATH (position $ci)"
+    elif (( oi )); then
+        doctor_warn "Orca teams shim on PATH (position $oi) — teammate spawns route to Orca"
+    else
+        doctor_ok "neither teams shim on PATH (expected outside a teams session)"
+    fi
+    [[ -e "$cmux_shim" ]] || doctor_na "cmux teams shim not installed yet: $cmux_shim"
+    [[ -e "$orca_shim" ]] || doctor_na "Orca teams shim not installed: $orca_shim"
+
+    # 같은 레포를 양쪽이 관리하면 'cc wt'가 git의 already-checked-out으로 막히고,
+    # 'cc clean'의 prune이 Orca 등록을 건드릴 수 있다.
+    if command -v orca &>/dev/null; then
+        local orca_out
+        if command -v timeout &>/dev/null; then
+            orca_out="$(timeout 10 orca worktree list 2>/dev/null)"
+        else
+            orca_out="$(orca worktree list 2>/dev/null)"
+        fi
+        if [[ -z "$orca_out" ]]; then
+            doctor_na "orca worktree list returned nothing (Orca not running?)"
+        else
+            local overlap=0 oline op ops
+            while IFS= read -r oline; do
+                read -ra ops <<<"$oline"
+                for op in "${ops[@]}"; do
+                    case "$op" in
+                        "$WT_BASE"/*|"$PROJECT_BASE"/*) overlap=$((overlap + 1)) ;;
+                    esac
+                done
+            done <<<"$orca_out"
+            if (( overlap )); then
+                doctor_warn "Orca manages $overlap path(s) under CC_PROJECT_BASE/CC_WT_BASE — 'cc wt' and 'cc clean' can collide there"
+            else
+                doctor_ok "no Orca worktree under CC_PROJECT_BASE/CC_WT_BASE"
+            fi
+        fi
+    else
+        doctor_na "orca CLI not found — coexistence checks limited to PATH/env"
+    fi
+
+    say "" "── claude settings ──"
+    local settings="$HOME/.claude/settings.json"
+    if [[ -r "$settings" ]]; then
+        local out tm dm
+        out="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d.get("teammateMode","<unset>"));print(d.get("permissions",{}).get("defaultMode","<unset>"))' "$settings" 2>/dev/null)"
+        if [[ -z "$out" ]]; then
+            doctor_warn "could not parse $settings (python3 missing or invalid JSON)"
+        else
+            tm="${out%%$'\n'*}"
+            dm="${out##*$'\n'}"
+            if [[ "$tm" == auto ]]; then
+                doctor_ok "teammateMode=$tm"
+            else
+                doctor_warn "teammateMode=$tm (use \"auto\" so named teammates open their own panes)"
+            fi
+            if [[ "$dm" == plan ]]; then
+                doctor_warn "permissions.defaultMode=plan — plain 'cc' sessions start read-only"
+                say "       'cc --teams' / 'cct' override it with --permission-mode default," \
+                    "       because teammates are not spawned while in plan mode."
+            else
+                doctor_ok "permissions.defaultMode=$dm"
+            fi
+        fi
+    else
+        doctor_warn "settings not readable: $settings"
+    fi
+
+    if (( run_probe )); then
+        say "" "── live probe ──"
+        if [[ -z "$cmux_bin" ]]; then
+            doctor_warn "skipped — cmux CLI not available"
+        else
+            say "       Running 'cmux claude-teams' with a stand-in for claude to observe" \
+                "       the real teams environment. No session opens, no tokens are spent;" \
+                "       cmux leaves one small dir under \$TMPDIR/cmux-cli-shims/ per run."
+            local line probe_out parsed=0 p_teams='' p_tmux='' p_pane='' p_tmuxbin=''
+            probe_out="$(doctor_probe)"
+            while IFS= read -r line; do
+                case "$line" in
+                    teams=*)   p_teams="${line#*=}";   parsed=1 ;;
+                    tmux=*)    p_tmux="${line#*=}";    parsed=1 ;;
+                    pane=*)    p_pane="${line#*=}";    parsed=1 ;;
+                    tmuxbin=*) p_tmuxbin="${line#*=}"; parsed=1 ;;
+                esac
+            done <<<"$probe_out"
+
+            if (( ! parsed )); then
+                doctor_warn "probe produced no readable output:"
+                say "       ${probe_out:-<empty>}"
+            else
+                if [[ "$p_teams" == 1 ]]; then
+                    doctor_ok "teams mode sets CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+                else
+                    doctor_fail "teams mode did NOT set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS (got '$p_teams')"
+                fi
+
+                if [[ -n "$p_tmux" ]]; then
+                    doctor_ok "teams mode sets TMUX=$p_tmux (pane ${p_pane:-<unset>})"
+                else
+                    doctor_fail "teams mode did NOT set TMUX — auto mode has nothing to split"
+                fi
+
+                case "$p_tmuxbin" in
+                    */cmux-cli-shims/*|*claude-teams-bin*)
+                        doctor_ok "tmux resolves to the cmux shim: $p_tmuxbin" ;;
+                    "$orca_shim")
+                        doctor_fail "tmux resolves to the Orca shim: $p_tmuxbin" ;;
+                    "")
+                        doctor_fail "no tmux on PATH inside teams mode" ;;
+                    *)
+                        doctor_fail "tmux resolves to real tmux: $p_tmuxbin (expected the cmux shim)" ;;
+                esac
+            fi
+        fi
+    fi
+
+    say "" "── notes ──" \
+        "       Teammates spawn via 'tmux split-window … -P -F #{pane_id}'." \
+        "       cmux's shim answers that family (verified: 'tmux list-panes' → %<id>)." \
+        "       The forms cmux rejects — 'new-session -A', 'new-window -t' — are not" \
+        "       used by claude's teammate path, so they are not a concern here." \
+        "       If panes still don't open with a green probe, capture the shim error" \
+        "       and report it against cmux — it is not a cc configuration problem."
+
+    say "" "summary: $fails fail, $warns warn"
+    return $fails
+}
+
+# ──────────────────────────────────────────────────
+# cc help
+# ──────────────────────────────────────────────────
+cmd_help() {
+    cat <<EOF
+cc — Claude Code wrapper
+
+Usage:
+  cc [claude-opts...]               Start Claude session in current directory
+  cc go <path> [claude-opts...]     Start Claude session in <path>
+  cc wt <branch> [...]              Create (or reuse) worktree from current project, then start Claude
+  cc wt <project> <branch> [...]    Create (or reuse) worktree from named project, then start Claude
+  cc clean                          List worktrees and prune stale ones
+  cc doctor [--no-probe]            Diagnose the agent-teams environment
+  cc install                        Install/update Claude Code to latest version
+  cc help                           Show this help
+  cct [...]                         Same as: cc --teams [...]
+
+cc options (expanded before passing to claude):
+  --teams                           Launch via 'cmux claude-teams' (agent teams / split-pane teammates)
+  --discord                         Enable Discord channel (--channels plugin:discord@claude-plugins-official)
+
+cc runs claude in a child process, so 'go' and 'wt' never change the
+directory of the shell you typed them in.
+
+Subcommand details:
+
+  cc go <path>
+    Start a Claude session in <path>.
+    e.g.  cc go ~/projects/my-app --model opus
+
+  cc wt [<project>] <branch>
+    Create a new worktree (or reuse existing) and start Claude.
+    Offers to remove the worktree after the session ends.
+    Omit <project> to use the current directory's git repository.
+    <project> can be an absolute path or a name under \$CC_PROJECT_BASE.
+    e.g.  cc wt feature/my-feature
+    e.g.  cc wt my-app feature/my-feature
+    e.g.  cc wt my-app feature/my-feature --model opus
+    e.g.  cc wt feature/my-feature --teams
+    e.g.  cc wt ~/projects/my-app fix/issue-123
+
+  cc clean
+    Lists all worktrees under \$CC_WT_BASE and runs git worktree prune.
+
+  cc --teams
+    Starts Claude through 'cmux claude-teams', which enables agent teams and
+    opens every NAMED teammate in its own cmux split pane. Requires the cmux
+    CLI, and works best from inside a cmux surface. Combines with the other
+    subcommands, e.g. 'cc go ~/projects/my-app --teams'.
+    Shorthand: cct
+
+    Adds --permission-mode default unless you pass a --permission-mode yourself.
+    Teammates are not spawned while in plan mode, so if permissions.defaultMode
+    is 'plan', a teams session would otherwise start unable to do the very
+    thing it was launched for.
+    To opt out:  cct --permission-mode plan
+
+  cc doctor [--no-probe]
+    Checks everything agent teams depends on: the cmux CLI, whether this shell is
+    a cmux surface, which tmux the PATH resolves to (cmux shim vs Orca shim vs
+    real tmux), and the relevant ~/.claude/settings.json keys.
+
+    It also reports coexistence with Orca, which ships a competing agent-teams
+    tmux shim: who owns this terminal, which of the two shims wins on PATH, and
+    whether Orca manages any worktree under CC_PROJECT_BASE / CC_WT_BASE (where
+    'cc wt' and 'cc clean' would collide with it).
+
+    The teams env vars (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, TMUX) only exist
+    inside the claude process cmux spawns, never in the shell that launched it.
+    So doctor runs a live probe: it swaps in a stand-in for claude via
+    CMUX_CUSTOM_CLAUDE_PATH and reports the environment teams mode actually
+    hands over. No session opens and no tokens are spent, but cmux leaves one
+    small dir under \$TMPDIR/cmux-cli-shims/ per run. Pass --no-probe to skip it.
+
+    Exit code = number of failures.
+
+Configuration (set in your shell rc file):
+  CC_PROJECT_BASE   Base directory for projects  (default: ~/projects)
+  CC_WT_BASE        Base directory for worktrees (default: ~/worktrees)
+
+Current config:
+  CC_PROJECT_BASE = $PROJECT_BASE
+  CC_WT_BASE      = $WT_BASE
+EOF
+}
+
+# ──────────────────────────────────────────────────
+# main
+# ──────────────────────────────────────────────────
+
+# --teams는 세션을 띄우기 직전이 아니라 여기서 먼저 검증한다.
+# cmd_wt는 worktree를 만든 뒤에 런처를 실행하므로, 그때 실패하면 늦다.
+if [[ "$*" == *--teams* ]]; then
+    if ! command -v cmux &>/dev/null; then
+        echo "cc: --teams requires the cmux CLI (not found on PATH)" >&2
+        echo "    install cmux, or drop --teams to run plain claude" >&2
+        exit 1
+    fi
+    if [[ -z "${CMUX_SURFACE_ID:-}" ]]; then
+        if [[ -n "${ORCA_PANE_KEY:-}${ORCA_WORKTREE_ID:-}" ]]; then
+            # 두 앱이 agent teams용으로 같은 'tmux' 이름을 쓴다. cmux가 자기 shim을
+            # PATH 앞에 붙이므로 Orca 터미널에서 실행해도 cmux가 이기고, 분할은
+            # 이 창이 아닌 cmux 쪽에 열린다. 막지는 않는다 — 의도적인 경우도 있다.
+            echo "cc: this is an Orca-managed terminal, not a cmux surface." >&2
+            echo "    --teams still runs, but cmux puts its own tmux shim ahead of Orca's," >&2
+            echo "    so teammate panes open in a cmux window you cannot see from here." >&2
+            echo "    Run it from a cmux pane instead." >&2
+        else
+            echo "cc: warning — not inside a cmux surface; teammate splits may not appear" >&2
+        fi
+    fi
+fi
+
+case "$1" in
+    go)      shift; cmd_go "$@" ;;
+    wt)      shift; cmd_wt "$@" ;;
+    clean)   cmd_clean ;;
+    doctor)  shift; cmd_doctor "$@" ;;
+    reload)  echo "cc: reload is no longer needed — every cc call runs the current bin/claude-cc" ;;
+    install) curl -fsSL https://claude.ai/install.sh | bash ;;
+    help)    cmd_help ;;
+    *)       expand_flags "$@"; exec "${launcher[@]}" "${args[@]}" ;;
+esac
